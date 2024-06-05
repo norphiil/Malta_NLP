@@ -1,3 +1,4 @@
+import os
 import wave
 import contextlib
 import numpy as np
@@ -5,22 +6,25 @@ import speech_recognition as sr
 import librosa
 import pandas as pd
 from pocketsphinx import AudioFile
-from scipy.signal import blackman, find_peaks
+from scipy.signal import find_peaks
+from scipy.signal.windows import blackman
 from scipy.fftpack import fft
 
 # Define the list of words to be recognized
-words_to_recognize = [
-    "Heed", "hid", "head", "had", "hard", "Hudd", "hod", "heard", "hoard", "hood",
+words_recognize = [
+    "heed", "hid", "head", "had", "hard", "hudd", "hod", "heard", "hoard", "hood",
     "who'd", "hade", "hid", "hoid", "hoed", "howd", "heered", "hared", "hured", "heed"
 ]
 
 # Define the ARPABET notation mapping (simplified for demonstration purposes)
 arpabet_mapping = {
-    "Heed": "IY", "hid": "IH", "head": "EH", "had": "AE", "hard": "AA", 
-    "Hudd": "AH", "hod": "AA", "heard": "ER", "hoard": "AO", "hood": "UH", 
-    "who'd": "UW", "hade": "EY", "hoid": "OY", "hoed": "OW", "howd": "AW", 
+    "heed": "IY", "hid": "IH", "head": "EH", "had": "AE", "hard": "AA",
+    "hudd": "AH", "hod": "AA", "heard": "ER", "hoard": "AO", "hood": "UH",
+    "who'd": "UW", "hade": "EY", "hoid": "OY", "hoed": "OW", "howd": "AW",
     "heered": "IY", "hared": "EH", "hured": "ER", "heed": "IY"
 }
+
+words_to_recognize = ["heed", "head", "hard"]
 
 # Class numbers for each ARPABET symbol
 class_number_mapping = {symbol: idx + 1 for idx, symbol in enumerate(set(arpabet_mapping.values()))}
@@ -39,13 +43,9 @@ def get_audio_duration(file_path):
 
 
 def extract_formants(y, sr):
-    # Apply pre-emphasis filter
-    pre_emphasis = 0.97
-    emphasized_signal = np.append(y[0], y[1:] - pre_emphasis * y[:-1])
-
     # Apply Blackman window
-    w = blackman(len(emphasized_signal))
-    y = emphasized_signal * w
+    w = blackman(len(y))
+    y = y * w
 
     # Perform FFT
     n = len(y)
@@ -60,7 +60,7 @@ def extract_formants(y, sr):
     amplitude_spectrum = 2*abs(Y)
 
     # Find peaks which represent formants
-    peaks, _ = find_peaks(amplitude_spectrum, distance=15)
+    peaks, _ = find_peaks(amplitude_spectrum, rel_height=0.9)
     formants = sorted(frq[peaks])
 
     # Return first three formants
@@ -79,14 +79,17 @@ def process_audio(file_path, speaker_label, gender):
     # Recognize and segment words
     audio = AudioFile(audio_file=file_path)
     for i, phrase in enumerate(audio):
-        word = words_to_recognize[i]
+        word = words_recognize[i]
         print(f"Processing word: {word}")
+        if word not in words_to_recognize:
+            continue
         start_time = phrase.start_frame / float(sr)
         end_time = (phrase.start_frame + phrase.n_frames()) / float(sr)
         word_audio = y[int(start_time * sr):int(end_time * sr)]
 
         # Extract features
-        f1, f2, f3 = extract_formants(word_audio, sr)
+        # f1, f2, f3 = extract_formants(word_audio, sr)
+        f1, f2, f3 = "None", "None", "None"
         vowel_phoneme = arpabet_mapping[word]
         class_number = class_number_mapping[vowel_phoneme]
 
@@ -101,6 +104,8 @@ def process_audio(file_path, speaker_label, gender):
             "Formant 2": f2,
             "Formant 3": f3
         })
+        if word == words_to_recognize[-1]:
+            break
     return results
 
 
@@ -113,16 +118,53 @@ def main(audio_files, output_csv):
         results = process_audio(file_path, speaker_label, gender)
         all_results.extend(results)
 
-    # Save to CSV
     df = pd.DataFrame(all_results)
     df.to_csv(output_csv, index=False)
 
 
-# Example usage
-audio_files = [
-    ("accents/brm_001/female/alw001/cwa_CT.wav", "alw001", "F"),
-    # Add more audio files as needed
-]
+def get_audio_files(base_path, num_group_folders=5, num_speaker_folders=5):
+    audio_files = []
+    group_folders = []
 
-output_csv = "output.csv"
+    # Get the group level folders (e.g., brm_001, lan_001)
+    for root, dirs, files in os.walk(base_path):
+        if root == base_path:
+            group_folders = dirs[:num_group_folders]
+            break
+
+    for group in group_folders:
+        group_path = os.path.join(base_path, group)
+        gender_folders = ['female', 'male']
+
+        for gender in gender_folders:
+            gender_path = os.path.join(group_path, gender)
+            if os.path.exists(gender_path):
+                speaker_folders = []
+
+                for root, dirs, files in os.walk(gender_path):
+                    if root == gender_path:
+                        speaker_folders = dirs[:num_speaker_folders]
+                        break
+
+                for speaker in speaker_folders:
+                    speaker_path = os.path.join(gender_path, speaker)
+                    for root, dirs, files in os.walk(speaker_path):
+                        for file in files:
+                            if file.endswith(".wav"):
+                                file_path = os.path.join(root, file)
+                                print(f"Found file: {file_path}")
+                                group_label = group.split("_")[0]
+                                speaker_label = speaker
+                                audio_files.append(
+                                    (file_path,
+                                     group_label + "_" + speaker_label,
+                                     gender)
+                                )
+
+    return audio_files
+
+
+audio_files = get_audio_files("accents", num_group_folders=5, num_speaker_folders=5)
+
+output_csv = "features.csv"
 main(audio_files, output_csv)
